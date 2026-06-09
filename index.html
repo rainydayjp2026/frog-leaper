@@ -72,7 +72,7 @@
   const MAX_GAP_INCREASE = 2;         // Per lily pad passed
 
   // --- State ---
-  let gameState = 'playing';          // 'playing' | 'gameover'
+  let gameState = 'title';            // 'title' | 'playing' | 'gameover'
   let score = 0;
   let cameraX = 0;                    // World offset (increases = scroll right)
   let scrollSpeed = SCROLL_SPEED_BASE;
@@ -307,6 +307,13 @@
 
     ctx.save();
     ctx.scale(sx, sy);
+
+    // ---- Title Screen ----
+    if (gameState === 'title') {
+      drawTitleScreen();
+      ctx.restore();
+      return;
+    }
 
     // ---- Sky gradient ----
     const skyGrad = ctx.createLinearGradient(0, 0, 0, WATER_Y);
@@ -580,13 +587,100 @@
     ctx.shadowBlur = 0;
   }
 
-  // --- Input handling ---
+  function drawTitleScreen() {
+    // Sky background
+    const skyGrad = ctx.createLinearGradient(0, 0, 0, WATER_Y);
+    skyGrad.addColorStop(0, '#4FC3F7');
+    skyGrad.addColorStop(0.5, '#81D4FA');
+    skyGrad.addColorStop(1, '#B3E5FC');
+    ctx.fillStyle = skyGrad;
+    ctx.fillRect(0, 0, CW, WATER_Y);
+
+    // Water
+    const waterGrad = ctx.createLinearGradient(0, WATER_Y, 0, CH);
+    waterGrad.addColorStop(0, '#0288D1');
+    waterGrad.addColorStop(0.3, '#0277BD');
+    waterGrad.addColorStop(0.7, '#01579B');
+    waterGrad.addColorStop(1, '#0D47A1');
+    ctx.fillStyle = waterGrad;
+    ctx.fillRect(0, WATER_Y, CW, CH - WATER_Y);
+
+    // Water wave
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    for (let x = 0; x <= CW; x += 2) {
+      const waveY = WATER_Y + Math.sin(x * 0.04) * 3 + Math.sin(x * 0.07) * 2;
+      if (x === 0) ctx.moveTo(x, waveY);
+      else ctx.lineTo(x, waveY);
+    }
+    ctx.stroke();
+
+    // Lily pads (decorative)
+    drawLilyPad(100, WATER_Y - PAD_H / 2 + 3, PAD_W + 5, PAD_H);
+    drawLilyPad(300, WATER_Y - PAD_H / 2 - 2, PAD_W - 5, PAD_H);
+
+    // Frog on first pad (decorative)
+    drawFrog(100, WATER_Y - PAD_H / 2 + 3 - FROG_H / 2 - PAD_H / 2);
+
+    // Title background
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.4)';
+    roundRect(ctx, CW / 2 - 160, 80, 320, 200, 16);
+    ctx.fill();
+
+    // Title text
+    ctx.fillStyle = '#FFD54F';
+    ctx.font = 'bold 42px Arial, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('Frog Leaper', CW / 2, 130);
+
+    // Subtitle
+    ctx.fillStyle = '#FFFFFF';
+    ctx.font = '16px Arial, sans-serif';
+    ctx.fillText('カエルの蓮渡り', CW / 2, 168);
+
+    // Instruction
+    ctx.fillStyle = '#B3E5FC';
+    ctx.font = '14px Arial, sans-serif';
+    ctx.fillText('水面に着地する直前にタップ！', CW / 2, 200);
+    ctx.fillText('蓮の葉を渡って進もう', CW / 2, 222);
+
+    // Start button
+    const btnX = CW / 2 - 90;
+    const btnY = 300;
+    const btnW = 180;
+    const btnH = 54;
+
+    const pulse = Math.sin(Date.now() * 0.004) * 0.15 + 0.85;
+    ctx.fillStyle = `rgba(102, 187, 106, ${pulse})`;
+    ctx.shadowColor = 'rgba(0,0,0,0.3)';
+    ctx.shadowBlur = 10;
+    ctx.beginPath();
+    roundRect(ctx, btnX, btnY, btnW, btnH, 14);
+    ctx.fill();
+    ctx.shadowBlur = 0;
+
+    ctx.fillStyle = '#FFFFFF';
+    ctx.font = 'bold 22px Arial, sans-serif';
+    ctx.fillText('タップしてスタート', CW / 2, btnY + btnH / 2);
+
+    canvas._retryBtn = { x: btnX, y: btnY, w: btnW, h: btnH };
+  }
+
+  // --- Drawing ---
   function handleTap(clientX, clientY) {
     const rect = canvas.getBoundingClientRect();
     const sx = scaleX();
     const sy = scaleY();
     const cx = (clientX - rect.left) / sx;
     const cy = (clientY - rect.top) / sy;
+
+    if (gameState === 'title') {
+      // Start the game on tap
+      initGame();
+      return;
+    }
 
     if (gameState === 'gameover') {
       // Check retry button
@@ -631,7 +725,6 @@
   }
 
   // --- Start ---
-  initGame();
   loop();
 
 })();
