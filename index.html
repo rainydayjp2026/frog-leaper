@@ -1,0 +1,640 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Frog Leaper - カエルの蓮渡り</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    width: 100%; height: 100%;
+    overflow: hidden;
+    background: #1a1a2e;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    touch-action: none;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+  canvas {
+    display: block;
+    background: #87CEEB;
+    touch-action: none;
+  }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<script>
+(function() {
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+
+  // --- Responsive sizing ---
+  function resize() {
+    const ratio = 400 / 700;
+    let w = window.innerWidth;
+    let h = window.innerHeight;
+    if (w / h > ratio) {
+      canvas.height = h;
+      canvas.width = h * ratio;
+    } else {
+      canvas.width = w;
+      canvas.height = w / ratio;
+    }
+    canvas.style.width = canvas.width + 'px';
+    canvas.style.height = canvas.height + 'px';
+  }
+  resize();
+  window.addEventListener('resize', resize);
+
+  // Canvas dimensions for logic (logical resolution)
+  const CW = 400;
+  const CH = 700;
+  const scaleX = () => canvas.width / CW;
+  const scaleY = () => canvas.height / CH;
+
+  // --- Constants ---
+  const WATER_Y = CH * 0.62;          // Water surface Y in logical coords
+  const GRAVITY = 0.55;
+  const AUTO_JUMP_VEL = -8.5;
+  const TAP_JUMP_VEL = -9.5;
+  const SCROLL_SPEED_BASE = 1.8;
+  const FROG_SCREEN_X = 160;          // Frog's fixed X position on screen
+  const FROG_W = 32;
+  const FROG_H = 28;
+  const PAD_W = 60;
+  const PAD_H = 14;
+  const LANDING_ZONE_HEIGHT = 28;     // Height above water that counts as landing zone
+  const MIN_GAP = 80;
+  const MAX_GAP_INITIAL = 150;
+  const MAX_GAP_INCREASE = 2;         // Per lily pad passed
+
+  // --- State ---
+  let gameState = 'playing';          // 'playing' | 'gameover'
+  let score = 0;
+  let cameraX = 0;                    // World offset (increases = scroll right)
+  let scrollSpeed = SCROLL_SPEED_BASE;
+  let pads = [];                      // Lily pads (world coords)
+  let frog = {
+    x: FROG_SCREEN_X,                 // Screen X (fixed)
+    y: 0,                             // Screen Y (computed)
+    vy: 0,
+    onPad: true,                      // Currently standing on a pad?
+    currentPad: null,                 // The pad we're standing on
+    autoJumped: false,                // Has auto-jumped off the last pad?
+    alive: true
+  };
+  let landingZoneActive = false;      // Is the landing timing zone visible?
+  let lastPadPassed = 0;             // For score tracking
+  let nextPadId = 0;
+  let frameCount = 0;
+  let particles = [];                 // Splash particles
+
+  // --- Lily pad generation ---
+  function getMaxGap() {
+    return MAX_GAP_INITIAL + score * MAX_GAP_INCREASE;
+  }
+
+  function generatePad(worldX) {
+    const gap = MIN_GAP + Math.random() * (getMaxGap() - MIN_GAP);
+    const x = worldX + gap;
+    // Lily pads float on the water, slight random Y variation
+    const y = WATER_Y - PAD_H / 2 + (Math.random() - 0.5) * 10;
+    pads.push({
+      x: x,
+      y: y,
+      w: PAD_W + (Math.random() - 0.5) * 10,
+      h: PAD_H,
+      id: nextPadId++,
+      passed: false
+    });
+  }
+
+  function initGame() {
+    gameState = 'playing';
+    score = 0;
+    cameraX = 0;
+    scrollSpeed = SCROLL_SPEED_BASE;
+    nextPadId = 0;
+    pads = [];
+    particles = [];
+    frog.y = WATER_Y - 60;
+    frog.vy = 0;
+    frog.onPad = true;
+    frog.currentPad = null;
+    frog.autoJumped = false;
+    frog.alive = true;
+    landingZoneActive = false;
+    lastPadPassed = 0;
+    frameCount = 0;
+
+    // Generate initial pads
+    generatePad(0);                   // First pad at or near camera start
+    // Generate a few more ahead
+    for (let i = 0; i < 5; i++) {
+      generatePad(pads[pads.length - 1].x + PAD_W / 2);
+    }
+    // Place frog on first pad
+    frog.y = pads[0].y - FROG_H / 2;
+    frog.currentPad = pads[0];
+  }
+
+  // --- Particles for splash ---
+  function spawnSplash(x, y) {
+    for (let i = 0; i < 12; i++) {
+      const angle = Math.random() * Math.PI * 2;
+      const speed = 1 + Math.random() * 3;
+      particles.push({
+        x: x, y: y,
+        vx: Math.cos(angle) * speed,
+        vy: Math.sin(angle) * speed - 2,
+        life: 1.0,
+        size: 2 + Math.random() * 4,
+        color: Math.random() > 0.5 ? '#4FC3F7' : '#81D4FA'
+      });
+    }
+  }
+
+  // --- Physics & Update ---
+  function update() {
+    if (gameState !== 'playing') return;
+
+    frameCount++;
+    scrollSpeed = SCROLL_SPEED_BASE + score * 0.05;
+    cameraX += scrollSpeed;
+
+    // Remove off-screen pads (behind camera)
+    pads = pads.filter(p => p.x + p.w + 50 > cameraX - CW);
+
+    // Generate new pads ahead
+    let lastPad = pads.length > 0 ? pads[pads.length - 1] : null;
+    while (!lastPad || lastPad.x < cameraX + CW + 100) {
+      generatePad(lastPad ? lastPad.x + PAD_W / 2 : cameraX + CW);
+      lastPad = pads[pads.length - 1];
+    }
+
+    // Find the pads visible on screen
+    const visiblePads = pads.filter(p => {
+      const sx = p.x - cameraX;
+      return sx > -p.w && sx < CW + p.w;
+    });
+
+    // Score: count pads passed (their right edge moved past frog)
+    for (const p of pads) {
+      if (!p.passed && p.x + p.w / 2 < cameraX + FROG_SCREEN_X) {
+        p.passed = true;
+        score++;
+      }
+    }
+
+    // --- Frog physics ---
+    const frogScreenX = FROG_SCREEN_X;
+    const frogScreenY = frog.y;
+
+    // Check if frog is standing on any pad
+    let landedOnPad = null;
+    for (const p of visiblePads) {
+      const px = p.x - cameraX;
+      const py = p.y;
+      // Check if frog's bottom is near pad surface and horizontally overlapping
+      const frogBottom = frogScreenY + FROG_H / 2;
+      const frogLeft = frogScreenX - FROG_W / 2;
+      const frogRight = frogScreenX + FROG_W / 2;
+      const padLeft = px - p.w / 2;
+      const padRight = px + p.w / 2;
+
+      if (frogBottom >= py - p.h / 2 - 2 &&
+          frogBottom <= py - p.h / 2 + 8 &&
+          frogRight > padLeft + 4 &&
+          frogLeft < padRight - 4 &&
+          frog.vy >= 0) {
+        // Land on this pad
+        landedOnPad = p;
+        break;
+      }
+    }
+
+    if (landedOnPad) {
+      // Landed safely on a pad
+      frog.y = landedOnPad.y - FROG_H / 2 - p.h / 2;
+      frog.vy = 0;
+      frog.onPad = true;
+      frog.currentPad = landedOnPad;
+      frog.autoJumped = false;
+      landingZoneActive = false;
+    } else {
+      // Check if there's a pad below us that we haven't reached yet
+      let padBelow = false;
+      for (const p of visiblePads) {
+        const px = p.x - cameraX;
+        const py = p.y;
+        const frogBottom = frogScreenY + FROG_H / 2;
+        const frogLeft = frogScreenX - FROG_W / 2;
+        const frogRight = frogScreenX + FROG_W / 2;
+        const padLeft = px - p.w / 2;
+        const padRight = px + p.w / 2;
+
+        if (frogRight > padLeft + 4 && frogLeft < padRight - 4) {
+          if (frogBottom < py - p.h / 2 && frogBottom > py - p.h / 2 - 20) {
+            padBelow = true;
+          }
+        }
+      }
+
+      if (frog.onPad) {
+        // Just left a pad - auto jump!
+        frog.onPad = false;
+        frog.currentPad = null;
+        frog.vy = AUTO_JUMP_VEL;
+        frog.autoJumped = true;
+      }
+
+      // Apply gravity
+      frog.vy += GRAVITY;
+      frog.y += frog.vy;
+
+      // Water surface interaction
+      const frogBottom = frog.y + FROG_H / 2;
+
+      if (frogBottom >= WATER_Y) {
+        // Check landing zone timing
+        const distInWater = frogBottom - WATER_Y;
+
+        if (distInWater <= LANDING_ZONE_HEIGHT && frog.vy > 0) {
+          // In landing zone
+          landingZoneActive = true;
+          // Don't fall through yet - hold at water surface until tapped or zone expires
+          frog.y = WATER_Y - FROG_H / 2 - (LANDING_ZONE_HEIGHT - distInWater);
+        } else if (distInWater > LANDING_ZONE_HEIGHT) {
+          // Past the landing zone - game over
+          if (frog.alive) {
+            frog.alive = false;
+            spawnSplash(frogScreenX, WATER_Y);
+            // Short delay then game over
+            setTimeout(() => {
+              if (gameState === 'playing') {
+                gameState = 'gameover';
+              }
+            }, 400);
+          }
+          // Keep sinking
+          frog.vy = Math.min(frog.vy, 3);
+        }
+      } else {
+        landingZoneActive = false;
+      }
+    }
+
+    // Update particles
+    for (let i = particles.length - 1; i >= 0; i--) {
+      const p = particles[i];
+      p.x += p.vx;
+      p.y += p.vy;
+      p.vy += 0.1;
+      p.life -= 0.025;
+      if (p.life <= 0) {
+        particles.splice(i, 1);
+      }
+    }
+  }
+
+  // --- Drawing ---
+  function draw() {
+    const sx = scaleX();
+    const sy = scaleY();
+
+    ctx.save();
+    ctx.scale(sx, sy);
+
+    // ---- Sky gradient ----
+    const skyGrad = ctx.createLinearGradient(0, 0, 0, WATER_Y);
+    skyGrad.addColorStop(0, '#4FC3F7');
+    skyGrad.addColorStop(0.5, '#81D4FA');
+    skyGrad.addColorStop(1, '#B3E5FC');
+    ctx.fillStyle = skyGrad;
+    ctx.fillRect(0, 0, CW, WATER_Y);
+
+    // ---- Clouds (decorative) ----
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.5)';
+    const cloudOffset = (cameraX * 0.1) % 400;
+    drawCloud(50 - cloudOffset, 60, 60);
+    drawCloud(200 - cloudOffset, 80, 45);
+    drawCloud(350 - cloudOffset, 50, 55);
+    drawCloud(480 - cloudOffset, 70, 40);
+
+    // ---- Water ----
+    const waterGrad = ctx.createLinearGradient(0, WATER_Y, 0, CH);
+    waterGrad.addColorStop(0, '#0288D1');
+    waterGrad.addColorStop(0.3, '#0277BD');
+    waterGrad.addColorStop(0.7, '#01579B');
+    waterGrad.addColorStop(1, '#0D47A1');
+    ctx.fillStyle = waterGrad;
+    ctx.fillRect(0, WATER_Y, CW, CH - WATER_Y);
+
+    // ---- Water surface wave ----
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    for (let x = 0; x <= CW; x += 2) {
+      const waveY = WATER_Y + Math.sin((x + cameraX * 0.5) * 0.04) * 3
+                  + Math.sin((x + cameraX * 0.3) * 0.07) * 2;
+      if (x === 0) ctx.moveTo(x, waveY);
+      else ctx.lineTo(x, waveY);
+    }
+    ctx.stroke();
+
+    // ---- Landing zone indicator (when active) ----
+    if (landingZoneActive && frog.alive) {
+      // Red zone marker at water surface
+      ctx.fillStyle = 'rgba(255, 50, 50, 0.25)';
+      ctx.fillRect(0, WATER_Y - 2, CW, LANDING_ZONE_HEIGHT + 4);
+
+      // Zone border lines
+      ctx.strokeStyle = 'rgba(255, 255, 100, 0.7)';
+      ctx.lineWidth = 2;
+      ctx.setLineDash([5, 5]);
+      ctx.beginPath();
+      ctx.moveTo(0, WATER_Y);
+      ctx.lineTo(CW, WATER_Y);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      // Pulsing circle at water surface near frog
+      const pulse = Math.sin(frameCount * 0.1) * 0.3 + 0.7;
+      ctx.strokeStyle = `rgba(255, 100, 100, ${pulse})`;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(FROG_SCREEN_X, WATER_Y, 20 + Math.sin(frameCount * 0.08) * 5, 0, Math.PI * 2);
+      ctx.stroke();
+
+      // "TAP!" text
+      ctx.fillStyle = `rgba(255, 255, 100, ${pulse})`;
+      ctx.font = 'bold 18px Arial, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText('TAP!', FROG_SCREEN_X, WATER_Y - 18);
+    }
+
+    // ---- Lily pads ----
+    for (const p of pads) {
+      const px = p.x - cameraX;
+      if (px < -p.w - 20 || px > CW + p.w + 20) continue;
+      drawLilyPad(px, p.y, p.w, p.h);
+    }
+
+    // ---- Frog ----
+    if (frog.alive) {
+      drawFrog(frog.x, frog.y);
+    } else {
+      // Draw sinking frog
+      drawFrog(frog.x, frog.y);
+      ctx.globalAlpha = Math.max(0, 1 - (frog.y - WATER_Y) / 100);
+      drawFrog(frog.x, frog.y);
+      ctx.globalAlpha = 1;
+    }
+
+    // ---- Particles ----
+    for (const p of particles) {
+      ctx.globalAlpha = p.life;
+      ctx.fillStyle = p.color;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.size * p.life, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+
+    // ---- Score ----
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
+    ctx.fillRect(8, 8, 120, 36);
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(8, 8, 120, 36);
+
+    ctx.fillStyle = '#FFFFFF';
+    ctx.font = 'bold 20px Arial, sans-serif';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('Score: ' + score, 18, 26);
+
+    // ---- Game Over screen ----
+    if (gameState === 'gameover') {
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.65)';
+      ctx.fillRect(0, 0, CW, CH);
+
+      ctx.fillStyle = '#FFD54F';
+      ctx.font = 'bold 36px Arial, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('GAME OVER', CW / 2, CH * 0.35);
+
+      ctx.fillStyle = '#FFFFFF';
+      ctx.font = 'bold 22px Arial, sans-serif';
+      ctx.fillText('Score: ' + score, CW / 2, CH * 0.45);
+
+      // Retry button
+      const btnX = CW / 2 - 80;
+      const btnY = CH * 0.53;
+      const btnW = 160;
+      const btnH = 50;
+
+      ctx.fillStyle = '#66BB6A';
+      ctx.shadowColor = 'rgba(0,0,0,0.3)';
+      ctx.shadowBlur = 8;
+      ctx.beginPath();
+      roundRect(ctx, btnX, btnY, btnW, btnH, 12);
+      ctx.fill();
+      ctx.shadowBlur = 0;
+
+      ctx.fillStyle = '#FFFFFF';
+      ctx.font = 'bold 20px Arial, sans-serif';
+      ctx.fillText('もう一度遊ぶ', CW / 2, btnY + btnH / 2);
+
+      // Store button bounds for click detection
+      canvas._retryBtn = { x: btnX, y: btnY, w: btnW, h: btnH };
+    } else {
+      canvas._retryBtn = null;
+    }
+
+    ctx.restore();
+  }
+
+  function roundRect(ctx, x, y, w, h, r) {
+    ctx.moveTo(x + r, y);
+    ctx.lineTo(x + w - r, y);
+    ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+    ctx.lineTo(x + w, y + h - r);
+    ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+    ctx.lineTo(x + r, y + h);
+    ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+    ctx.lineTo(x, y + r);
+    ctx.quadraticCurveTo(x, y, x + r, y);
+    ctx.closePath();
+  }
+
+  function drawCloud(x, y, size) {
+    ctx.beginPath();
+    ctx.arc(x, y, size * 0.4, 0, Math.PI * 2);
+    ctx.arc(x + size * 0.35, y - size * 0.15, size * 0.35, 0, Math.PI * 2);
+    ctx.arc(x + size * 0.7, y, size * 0.3, 0, Math.PI * 2);
+    ctx.arc(x + size * 0.35, y + size * 0.1, size * 0.3, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  function drawLilyPad(x, y, w, h) {
+    // Shadow
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.15)';
+    ctx.beginPath();
+    ctx.ellipse(x + 3, y + 3, w / 2, h / 2, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Main pad body
+    ctx.fillStyle = '#43A047';
+    ctx.beginPath();
+    ctx.ellipse(x, y, w / 2, h / 2, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Lighter inner
+    ctx.fillStyle = '#66BB6A';
+    ctx.beginPath();
+    ctx.ellipse(x, y - 1, w * 0.35, h * 0.3, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Vein lines
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.2)';
+    ctx.lineWidth = 1;
+    for (let i = -2; i <= 2; i++) {
+      ctx.beginPath();
+      ctx.moveTo(x, y);
+      ctx.lineTo(x + i * w * 0.15, y - h * 0.3);
+      ctx.stroke();
+    }
+
+    // Edge highlight
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.2)';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.ellipse(x, y, w / 2, h / 2, 0, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+
+  function drawFrog(x, y) {
+    // Body (green ellipse)
+    ctx.fillStyle = '#4CAF50';
+    ctx.shadowColor = 'rgba(0,0,0,0.2)';
+    ctx.shadowBlur = 4;
+    ctx.beginPath();
+    ctx.ellipse(x, y, FROG_W / 2, FROG_H / 2, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Lighter belly
+    ctx.shadowBlur = 0;
+    ctx.fillStyle = '#81C784';
+    ctx.beginPath();
+    ctx.ellipse(x, y + FROG_H * 0.12, FROG_W * 0.3, FROG_H * 0.25, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Eye whites
+    ctx.fillStyle = '#FFFFFF';
+    ctx.beginPath();
+    ctx.ellipse(x - FROG_W * 0.22, y - FROG_H * 0.22, 6, 7, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.ellipse(x + FROG_W * 0.22, y - FROG_H * 0.22, 6, 7, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Pupils
+    ctx.fillStyle = '#1B1B1B';
+    ctx.beginPath();
+    ctx.arc(x - FROG_W * 0.22, y - FROG_H * 0.22, 3.5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(x + FROG_W * 0.22, y - FROG_H * 0.22, 3.5, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Eye highlights
+    ctx.fillStyle = '#FFFFFF';
+    ctx.beginPath();
+    ctx.arc(x - FROG_W * 0.25, y - FROG_H * 0.26, 1.8, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(x + FROG_W * 0.19, y - FROG_H * 0.26, 1.8, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Mouth (small smile)
+    ctx.strokeStyle = '#2E7D32';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.arc(x, y + FROG_H * 0.08, 6, 0.1, Math.PI - 0.1);
+    ctx.stroke();
+
+    // Cheek blush
+    ctx.fillStyle = 'rgba(255, 150, 150, 0.3)';
+    ctx.beginPath();
+    ctx.ellipse(x - FROG_W * 0.3, y + FROG_H * 0.05, 4, 3, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.ellipse(x + FROG_W * 0.3, y + FROG_H * 0.05, 4, 3, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.shadowBlur = 0;
+  }
+
+  // --- Input handling ---
+  function handleTap(clientX, clientY) {
+    const rect = canvas.getBoundingClientRect();
+    const sx = scaleX();
+    const sy = scaleY();
+    const cx = (clientX - rect.left) / sx;
+    const cy = (clientY - rect.top) / sy;
+
+    if (gameState === 'gameover') {
+      // Check retry button
+      const btn = canvas._retryBtn;
+      if (btn && cx >= btn.x && cx <= btn.x + btn.w && cy >= btn.y && cy <= btn.y + btn.h) {
+        initGame();
+      }
+      return;
+    }
+
+    // During gameplay: tap = re-jump if in landing zone
+    if (landingZoneActive && frog.alive && gameState === 'playing') {
+      // Re-jump!
+      frog.vy = TAP_JUMP_VEL;
+      landingZoneActive = false;
+      // Visual feedback: small splash at water surface
+      spawnSplash(FROG_SCREEN_X, WATER_Y);
+    }
+  }
+
+  // --- Mouse events ---
+  canvas.addEventListener('mousedown', function(e) {
+    e.preventDefault();
+    handleTap(e.clientX, e.clientY);
+  });
+  canvas.addEventListener('touchstart', function(e) {
+    e.preventDefault();
+    const touch = e.touches[0];
+    if (touch) handleTap(touch.clientX, touch.clientY);
+  }, { passive: false });
+
+  // Prevent context menu on long press
+  canvas.addEventListener('contextmenu', function(e) {
+    e.preventDefault();
+  });
+
+  // --- Game Loop ---
+  function loop() {
+    update();
+    draw();
+    requestAnimationFrame(loop);
+  }
+
+  // --- Start ---
+  initGame();
+  loop();
+
+})();
+</script>
+</body>
+</html>
