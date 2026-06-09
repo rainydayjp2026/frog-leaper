@@ -5,21 +5,23 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
 <title>Frog Leaper - カエルの蓮渡り</title>
 <style>
-  * { margin: 0; padding: 0; box-sizing: border-box; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
   html, body {
-    width: 100%; height: 100%;
+    width: 100%;
+    height: 100%;
     overflow: hidden;
-    background: #1a1a2e;
+    background: #132238;
     display: flex;
     justify-content: center;
     align-items: center;
     touch-action: none;
     -webkit-user-select: none;
     user-select: none;
+    font-family: Arial, sans-serif;
   }
   canvas {
     display: block;
-    background: #87CEEB;
+    background: #87ceeb;
     touch-action: none;
   }
 </style>
@@ -31,442 +33,331 @@
   const canvas = document.getElementById('game');
   const ctx = canvas.getContext('2d');
 
-  // --- Responsive sizing ---
-  function resize() {
-    const ratio = 400 / 700;
-    let w = window.innerWidth;
-    let h = window.innerHeight;
-    if (w / h > ratio) {
-      canvas.height = h;
-      canvas.width = h * ratio;
-    } else {
-      canvas.width = w;
-      canvas.height = w / ratio;
+  const CW = 400;
+  const CH = 700;
+  const WATER_Y = 430;
+  const GROUND_Y = WATER_Y - 46;
+  const SHORE_X = 150;
+  const FROG_W = 34;
+  const FROG_H = 28;
+  const PAD_H = 16;
+  const PAD_W_MIN = 74;
+  const PAD_W_MAX = 102;
+  const RUN_SPEED = 2.5;
+  const GRAVITY = 0.48;
+  const JUMP_VY = -8.9;
+  const TAP_BOOST_VY = -9.7;
+  const TIMING_WINDOW_HEIGHT = 38;
+  const SINK_DEPTH = 36;
+  const PAD_EXIT_MARGIN = 10;
+  const CAMERA_LEFT_MARGIN = 100;
+  const WATER_SCROLL_SPEED = 0.9;
+
+  const state = {
+    mode: 'title',
+    frame: 0,
+    score: 0,
+    bestScore: 0,
+    cameraX: 0,
+    pads: [],
+    particles: [],
+    lilyCounter: 0,
+    timingWindowActive: false,
+    timingWindowProgress: 0,
+    inputLockedUntilRelease: false,
+    frog: createFrog(),
+    buttons: {
+      primary: null
     }
+  };
+
+  function createFrog() {
+    return {
+      x: 84,
+      y: GROUND_Y - FROG_H / 2,
+      vy: 0,
+      state: 'running',
+      supportId: 'land',
+      leftSupportAt: 0,
+      alive: true,
+      rotation: 0,
+      justBoosted: false
+    };
+  }
+
+  function resize() {
+    const ratio = CW / CH;
+    let width = window.innerWidth;
+    let height = window.innerHeight;
+
+    if (width / height > ratio) {
+      width = height * ratio;
+    } else {
+      height = width / ratio;
+    }
+
+    canvas.width = Math.round(width);
+    canvas.height = Math.round(height);
     canvas.style.width = canvas.width + 'px';
     canvas.style.height = canvas.height + 'px';
   }
-  resize();
-  window.addEventListener('resize', resize);
 
-  // Canvas dimensions for logic (logical resolution)
-  const CW = 400;
-  const CH = 700;
-  const scaleX = () => canvas.width / CW;
-  const scaleY = () => canvas.height / CH;
-
-  // --- Constants ---
-  const WATER_Y = CH * 0.62;          // Water surface Y in logical coords
-  const GRAVITY = 0.55;
-  const AUTO_JUMP_VEL = -8.5;
-  const TAP_JUMP_VEL = -9.5;
-  const SCROLL_SPEED_BASE = 1.8;
-  const FROG_SCREEN_X = 160;          // Frog's fixed X position on screen
-  const FROG_W = 32;
-  const FROG_H = 28;
-  const PAD_W = 60;
-  const PAD_H = 14;
-  const LANDING_ZONE_HEIGHT = 28;     // Height above water that counts as landing zone
-  const MIN_GAP = 80;
-  const MAX_GAP_INITIAL = 150;
-  const MAX_GAP_INCREASE = 2;         // Per lily pad passed
-
-  // --- State ---
-  let gameState = 'title';            // 'title' | 'playing' | 'gameover'
-  let score = 0;
-  let cameraX = 0;                    // World offset (increases = scroll right)
-  let scrollSpeed = SCROLL_SPEED_BASE;
-  let pads = [];                      // Lily pads (world coords)
-  let frog = {
-    x: FROG_SCREEN_X,                 // Screen X (fixed)
-    y: 0,                             // Screen Y (computed)
-    vy: 0,
-    onPad: true,                      // Currently standing on a pad?
-    currentPad: null,                 // The pad we're standing on
-    autoJumped: false,                // Has auto-jumped off the last pad?
-    alive: true
-  };
-  let landingZoneActive = false;      // Is the landing timing zone visible?
-  let lastPadPassed = 0;             // For score tracking
-  let nextPadId = 0;
-  let frameCount = 0;
-  let particles = [];                 // Splash particles
-
-  // --- Lily pad generation ---
-  function getMaxGap() {
-    return MAX_GAP_INITIAL + score * MAX_GAP_INCREASE;
+  function clamp(value, min, max) {
+    return Math.max(min, Math.min(max, value));
   }
 
-  function generatePad(worldX) {
-    const gap = MIN_GAP + Math.random() * (getMaxGap() - MIN_GAP);
-    const x = worldX + gap;
-    // Lily pads float on the water, slight random Y variation
-    const y = WATER_Y - PAD_H / 2 + (Math.random() - 0.5) * 10;
-    pads.push({
-      x: x,
-      y: y,
-      w: PAD_W + (Math.random() - 0.5) * 10,
-      h: PAD_H,
-      id: nextPadId++,
-      passed: false
-    });
+  function rand(min, max) {
+    return min + Math.random() * (max - min);
   }
 
-  function initGame() {
-    gameState = 'playing';
-    score = 0;
-    cameraX = 0;
-    scrollSpeed = SCROLL_SPEED_BASE;
-    nextPadId = 0;
-    pads = [];
-    particles = [];
-    frog.y = WATER_Y - 60;
-    frog.vy = 0;
-    frog.onPad = true;
-    frog.currentPad = null;
-    frog.autoJumped = false;
-    frog.alive = true;
-    landingZoneActive = false;
-    lastPadPassed = 0;
-    frameCount = 0;
+  function worldToScreenX(worldX) {
+    return worldX - state.cameraX;
+  }
 
-    // Generate initial pads
-    generatePad(0);                   // First pad at or near camera start
-    // Generate a few more ahead
-    for (let i = 0; i < 5; i++) {
-      generatePad(pads[pads.length - 1].x + PAD_W / 2);
+  function frogScreenX() {
+    return worldToScreenX(state.frog.x);
+  }
+
+  function resetWorld() {
+    state.frame = 0;
+    state.score = 0;
+    state.cameraX = 0;
+    state.pads = [];
+    state.particles = [];
+    state.lilyCounter = 0;
+    state.timingWindowActive = false;
+    state.timingWindowProgress = 0;
+    state.inputLockedUntilRelease = false;
+    state.buttons.primary = null;
+    state.frog = createFrog();
+
+    let nextX = SHORE_X + 88;
+    for (let i = 0; i < 8; i++) {
+      nextX = addPad(nextX);
     }
-    // Place frog on first pad
-    frog.y = pads[0].y - FROG_H / 2;
-    frog.currentPad = pads[0];
   }
 
-  // --- Particles for splash ---
-  function spawnSplash(x, y) {
-    for (let i = 0; i < 12; i++) {
-      const angle = Math.random() * Math.PI * 2;
-      const speed = 1 + Math.random() * 3;
-      particles.push({
-        x: x, y: y,
+  function addPad(startX) {
+    const scoreFactor = Math.min(state.score, 18);
+    const gapMin = 78 + scoreFactor * 2.5;
+    const gapMax = 122 + scoreFactor * 3.5;
+    const width = rand(PAD_W_MIN, PAD_W_MAX);
+    const padCenterX = startX + rand(gapMin, gapMax);
+    const padY = WATER_Y - 4 + rand(-12, 12);
+
+    state.pads.push({
+      id: 'pad-' + (++state.lilyCounter),
+      x: padCenterX,
+      y: padY,
+      w: width,
+      h: PAD_H,
+      counted: false
+    });
+
+    return padCenterX + width / 2;
+  }
+
+  function startGame() {
+    resetWorld();
+    state.mode = 'playing';
+  }
+
+  function gameOver() {
+    if (state.mode !== 'playing') return;
+    state.mode = 'gameover';
+    state.bestScore = Math.max(state.bestScore, state.score);
+    state.timingWindowActive = false;
+    state.timingWindowProgress = 0;
+    state.frog.alive = false;
+    state.frog.state = 'sinking';
+    spawnSplash(state.frog.x, Math.max(WATER_Y, state.frog.y + FROG_H / 2 - 4), 16);
+  }
+
+  function spawnSplash(worldX, worldY, count) {
+    for (let i = 0; i < count; i++) {
+      const angle = rand(-Math.PI * 0.9, -Math.PI * 0.1);
+      const speed = rand(1.1, 4.4);
+      state.particles.push({
+        x: worldX,
+        y: worldY,
         vx: Math.cos(angle) * speed,
-        vy: Math.sin(angle) * speed - 2,
-        life: 1.0,
-        size: 2 + Math.random() * 4,
-        color: Math.random() > 0.5 ? '#4FC3F7' : '#81D4FA'
+        vy: Math.sin(angle) * speed,
+        life: rand(18, 34),
+        size: rand(2, 5),
+        color: Math.random() > 0.5 ? '#b3ecff' : '#5ec8ff'
       });
     }
   }
 
-  // --- Physics & Update ---
-  function update() {
-    if (gameState !== 'playing') return;
-
-    frameCount++;
-    scrollSpeed = SCROLL_SPEED_BASE + score * 0.05;
-    cameraX += scrollSpeed;
-
-    // Remove off-screen pads (behind camera)
-    pads = pads.filter(p => p.x + p.w + 50 > cameraX - CW);
-
-    // Generate new pads ahead
-    let lastPad = pads.length > 0 ? pads[pads.length - 1] : null;
-    while (!lastPad || lastPad.x < cameraX + CW + 100) {
-      generatePad(lastPad ? lastPad.x + PAD_W / 2 : cameraX + CW);
-      lastPad = pads[pads.length - 1];
+  function ensurePadsAhead() {
+    let lastPad = state.pads[state.pads.length - 1];
+    while (!lastPad || lastPad.x < state.cameraX + CW + 220) {
+      const startX = lastPad ? lastPad.x + lastPad.w / 2 : SHORE_X + 88;
+      addPad(startX);
+      lastPad = state.pads[state.pads.length - 1];
     }
 
-    // Find the pads visible on screen
-    const visiblePads = pads.filter(p => {
-      const sx = p.x - cameraX;
-      return sx > -p.w && sx < CW + p.w;
+    state.pads = state.pads.filter(function(pad) {
+      return pad.x + pad.w / 2 > state.cameraX - 180;
     });
-
-    // Score: count pads passed (their right edge moved past frog)
-    for (const p of pads) {
-      if (!p.passed && p.x + p.w / 2 < cameraX + FROG_SCREEN_X) {
-        p.passed = true;
-        score++;
-      }
-    }
-
-    // --- Frog physics ---
-    const frogScreenX = FROG_SCREEN_X;
-    const frogScreenY = frog.y;
-
-    // Check if frog is standing on any pad
-    let landedOnPad = null;
-    for (const p of visiblePads) {
-      const px = p.x - cameraX;
-      const py = p.y;
-      // Check if frog's bottom is near pad surface and horizontally overlapping
-      const frogBottom = frogScreenY + FROG_H / 2;
-      const frogLeft = frogScreenX - FROG_W / 2;
-      const frogRight = frogScreenX + FROG_W / 2;
-      const padLeft = px - p.w / 2;
-      const padRight = px + p.w / 2;
-
-      if (frogBottom >= py - p.h / 2 - 2 &&
-          frogBottom <= py - p.h / 2 + 8 &&
-          frogRight > padLeft + 4 &&
-          frogLeft < padRight - 4 &&
-          frog.vy >= 0) {
-        // Land on this pad
-        landedOnPad = p;
-        break;
-      }
-    }
-
-    if (landedOnPad) {
-      // Landed safely on a pad
-      frog.y = landedOnPad.y - FROG_H / 2 - p.h / 2;
-      frog.vy = 0;
-      frog.onPad = true;
-      frog.currentPad = landedOnPad;
-      frog.autoJumped = false;
-      landingZoneActive = false;
-    } else {
-      // Check if there's a pad below us that we haven't reached yet
-      let padBelow = false;
-      for (const p of visiblePads) {
-        const px = p.x - cameraX;
-        const py = p.y;
-        const frogBottom = frogScreenY + FROG_H / 2;
-        const frogLeft = frogScreenX - FROG_W / 2;
-        const frogRight = frogScreenX + FROG_W / 2;
-        const padLeft = px - p.w / 2;
-        const padRight = px + p.w / 2;
-
-        if (frogRight > padLeft + 4 && frogLeft < padRight - 4) {
-          if (frogBottom < py - p.h / 2 && frogBottom > py - p.h / 2 - 20) {
-            padBelow = true;
-          }
-        }
-      }
-
-      if (frog.onPad) {
-        // Just left a pad - auto jump!
-        frog.onPad = false;
-        frog.currentPad = null;
-        frog.vy = AUTO_JUMP_VEL;
-        frog.autoJumped = true;
-      }
-
-      // Apply gravity
-      frog.vy += GRAVITY;
-      frog.y += frog.vy;
-
-      // Water surface interaction
-      const frogBottom = frog.y + FROG_H / 2;
-
-      if (frogBottom >= WATER_Y) {
-        // Check landing zone timing
-        const distInWater = frogBottom - WATER_Y;
-
-        if (distInWater <= LANDING_ZONE_HEIGHT && frog.vy > 0) {
-          // In landing zone
-          landingZoneActive = true;
-          // Don't fall through yet - hold at water surface until tapped or zone expires
-          frog.y = WATER_Y - FROG_H / 2 - (LANDING_ZONE_HEIGHT - distInWater);
-        } else if (distInWater > LANDING_ZONE_HEIGHT) {
-          // Past the landing zone - game over
-          if (frog.alive) {
-            frog.alive = false;
-            spawnSplash(frogScreenX, WATER_Y);
-            // Short delay then game over
-            setTimeout(() => {
-              if (gameState === 'playing') {
-                gameState = 'gameover';
-              }
-            }, 400);
-          }
-          // Keep sinking
-          frog.vy = Math.min(frog.vy, 3);
-        }
-      } else {
-        landingZoneActive = false;
-      }
-    }
-
-    // Update particles
-    for (let i = particles.length - 1; i >= 0; i--) {
-      const p = particles[i];
-      p.x += p.vx;
-      p.y += p.vy;
-      p.vy += 0.1;
-      p.life -= 0.025;
-      if (p.life <= 0) {
-        particles.splice(i, 1);
-      }
-    }
   }
 
-  // --- Drawing ---
-  function draw() {
-    const sx = scaleX();
-    const sy = scaleY();
+  function updateCamera() {
+    const targetCameraX = Math.max(0, state.frog.x - CAMERA_LEFT_MARGIN);
+    state.cameraX += (targetCameraX - state.cameraX) * 0.12;
+  }
 
-    ctx.save();
-    ctx.scale(sx, sy);
+  function getPadTop(pad) {
+    return pad.y - pad.h / 2;
+  }
 
-    // ---- Title Screen ----
-    if (gameState === 'title') {
-      drawTitleScreen();
-      ctx.restore();
+  function supportSurfaceY(supportId) {
+    if (supportId === 'land') return GROUND_Y;
+    const pad = state.pads.find(function(item) { return item.id === supportId; });
+    return pad ? getPadTop(pad) : GROUND_Y;
+  }
+
+  function updateRunning() {
+    const frog = state.frog;
+    frog.x += RUN_SPEED;
+    frog.y = supportSurfaceY(frog.supportId) - FROG_H / 2;
+
+    if (frog.supportId === 'land') {
+      if (frog.x + FROG_W / 2 >= SHORE_X) {
+        launchFrog();
+      }
       return;
     }
 
-    // ---- Sky gradient ----
-    const skyGrad = ctx.createLinearGradient(0, 0, 0, WATER_Y);
-    skyGrad.addColorStop(0, '#4FC3F7');
-    skyGrad.addColorStop(0.5, '#81D4FA');
-    skyGrad.addColorStop(1, '#B3E5FC');
-    ctx.fillStyle = skyGrad;
-    ctx.fillRect(0, 0, CW, WATER_Y);
-
-    // ---- Clouds (decorative) ----
-    ctx.fillStyle = 'rgba(255, 255, 255, 0.5)';
-    const cloudOffset = (cameraX * 0.1) % 400;
-    drawCloud(50 - cloudOffset, 60, 60);
-    drawCloud(200 - cloudOffset, 80, 45);
-    drawCloud(350 - cloudOffset, 50, 55);
-    drawCloud(480 - cloudOffset, 70, 40);
-
-    // ---- Water ----
-    const waterGrad = ctx.createLinearGradient(0, WATER_Y, 0, CH);
-    waterGrad.addColorStop(0, '#0288D1');
-    waterGrad.addColorStop(0.3, '#0277BD');
-    waterGrad.addColorStop(0.7, '#01579B');
-    waterGrad.addColorStop(1, '#0D47A1');
-    ctx.fillStyle = waterGrad;
-    ctx.fillRect(0, WATER_Y, CW, CH - WATER_Y);
-
-    // ---- Water surface wave ----
-    ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)';
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    for (let x = 0; x <= CW; x += 2) {
-      const waveY = WATER_Y + Math.sin((x + cameraX * 0.5) * 0.04) * 3
-                  + Math.sin((x + cameraX * 0.3) * 0.07) * 2;
-      if (x === 0) ctx.moveTo(x, waveY);
-      else ctx.lineTo(x, waveY);
-    }
-    ctx.stroke();
-
-    // ---- Landing zone indicator (when active) ----
-    if (landingZoneActive && frog.alive) {
-      // Red zone marker at water surface
-      ctx.fillStyle = 'rgba(255, 50, 50, 0.25)';
-      ctx.fillRect(0, WATER_Y - 2, CW, LANDING_ZONE_HEIGHT + 4);
-
-      // Zone border lines
-      ctx.strokeStyle = 'rgba(255, 255, 100, 0.7)';
-      ctx.lineWidth = 2;
-      ctx.setLineDash([5, 5]);
-      ctx.beginPath();
-      ctx.moveTo(0, WATER_Y);
-      ctx.lineTo(CW, WATER_Y);
-      ctx.stroke();
-      ctx.setLineDash([]);
-
-      // Pulsing circle at water surface near frog
-      const pulse = Math.sin(frameCount * 0.1) * 0.3 + 0.7;
-      ctx.strokeStyle = `rgba(255, 100, 100, ${pulse})`;
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.arc(FROG_SCREEN_X, WATER_Y, 20 + Math.sin(frameCount * 0.08) * 5, 0, Math.PI * 2);
-      ctx.stroke();
-
-      // "TAP!" text
-      ctx.fillStyle = `rgba(255, 255, 100, ${pulse})`;
-      ctx.font = 'bold 18px Arial, sans-serif';
-      ctx.textAlign = 'center';
-      ctx.fillText('TAP!', FROG_SCREEN_X, WATER_Y - 18);
+    const currentPad = state.pads.find(function(item) { return item.id === frog.supportId; });
+    if (!currentPad) {
+      launchFrog();
+      return;
     }
 
-    // ---- Lily pads ----
-    for (const p of pads) {
-      const px = p.x - cameraX;
-      if (px < -p.w - 20 || px > CW + p.w + 20) continue;
-      drawLilyPad(px, p.y, p.w, p.h);
+    const padRight = currentPad.x + currentPad.w / 2;
+    if (frog.x + FROG_W / 2 >= padRight - PAD_EXIT_MARGIN) {
+      launchFrog();
+    }
+  }
+
+  function launchFrog(boosted) {
+    const frog = state.frog;
+    frog.state = 'air';
+    frog.leftSupportAt = frog.x;
+    frog.vy = boosted ? TAP_BOOST_VY : JUMP_VY;
+    frog.justBoosted = !!boosted;
+    frog.supportId = null;
+    state.timingWindowActive = false;
+    state.timingWindowProgress = 0;
+  }
+
+  function maybeLandOnPad(previousBottom) {
+    const frog = state.frog;
+    const currentBottom = frog.y + FROG_H / 2;
+    const frogLeft = frog.x - FROG_W / 2 + 4;
+    const frogRight = frog.x + FROG_W / 2 - 4;
+
+    for (const pad of state.pads) {
+      const padLeft = pad.x - pad.w / 2;
+      const padRight = pad.x + pad.w / 2;
+      const padTop = getPadTop(pad);
+      if (frogRight < padLeft || frogLeft > padRight) continue;
+      if (frog.vy < 0) continue;
+      if (previousBottom <= padTop + 2 && currentBottom >= padTop - 3) {
+        frog.state = 'running';
+        frog.supportId = pad.id;
+        frog.vy = 0;
+        frog.y = padTop - FROG_H / 2;
+        frog.justBoosted = false;
+        state.timingWindowActive = false;
+        state.timingWindowProgress = 0;
+        if (!pad.counted) {
+          pad.counted = true;
+          state.score += 1;
+          state.bestScore = Math.max(state.bestScore, state.score);
+        }
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function updateAirborne() {
+    const frog = state.frog;
+    const previousBottom = frog.y + FROG_H / 2;
+
+    frog.x += RUN_SPEED;
+    frog.vy += GRAVITY;
+    frog.y += frog.vy;
+
+    if (maybeLandOnPad(previousBottom)) {
+      return;
     }
 
-    // ---- Frog ----
-    if (frog.alive) {
-      drawFrog(frog.x, frog.y);
-    } else {
-      // Draw sinking frog
-      drawFrog(frog.x, frog.y);
-      ctx.globalAlpha = Math.max(0, 1 - (frog.y - WATER_Y) / 100);
-      drawFrog(frog.x, frog.y);
-      ctx.globalAlpha = 1;
+    const bottom = frog.y + FROG_H / 2;
+    const inWindow = frog.vy > 0 && bottom >= WATER_Y - TIMING_WINDOW_HEIGHT && bottom <= WATER_Y + 6;
+    state.timingWindowActive = inWindow;
+    state.timingWindowProgress = clamp((bottom - (WATER_Y - TIMING_WINDOW_HEIGHT)) / (TIMING_WINDOW_HEIGHT + 6), 0, 1);
+
+    if (bottom > WATER_Y + SINK_DEPTH) {
+      gameOver();
+    }
+  }
+
+  function updateSinking() {
+    const frog = state.frog;
+    frog.x += RUN_SPEED * 0.35;
+    frog.vy += GRAVITY * 0.25;
+    frog.y += Math.max(frog.vy, 1.6);
+  }
+
+  function updateParticles() {
+    for (let i = state.particles.length - 1; i >= 0; i--) {
+      const p = state.particles[i];
+      p.x += p.vx;
+      p.y += p.vy;
+      p.vy += 0.12;
+      p.life -= 1;
+      if (p.life <= 0) {
+        state.particles.splice(i, 1);
+      }
+    }
+  }
+
+  function update() {
+    state.frame += 1;
+
+    if (state.mode === 'playing') {
+      if (state.frog.state === 'running') {
+        updateRunning();
+      } else if (state.frog.state === 'air') {
+        updateAirborne();
+      } else if (state.frog.state === 'sinking') {
+        updateSinking();
+      }
+      ensurePadsAhead();
+      updateCamera();
+    } else if (state.mode === 'gameover') {
+      updateSinking();
+      updateCamera();
     }
 
-    // ---- Particles ----
-    for (const p of particles) {
-      ctx.globalAlpha = p.life;
-      ctx.fillStyle = p.color;
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, p.size * p.life, 0, Math.PI * 2);
-      ctx.fill();
-    }
-    ctx.globalAlpha = 1;
+    updateParticles();
+  }
 
-    // ---- Score ----
-    ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
-    ctx.fillRect(8, 8, 120, 36);
-    ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)';
-    ctx.lineWidth = 1;
-    ctx.strokeRect(8, 8, 120, 36);
+  function clearCanvas() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.save();
+    ctx.scale(canvas.width / CW, canvas.height / CH);
+  }
 
-    ctx.fillStyle = '#FFFFFF';
-    ctx.font = 'bold 20px Arial, sans-serif';
-    ctx.textAlign = 'left';
-    ctx.textBaseline = 'middle';
-    ctx.fillText('Score: ' + score, 18, 26);
-
-    // ---- Game Over screen ----
-    if (gameState === 'gameover') {
-      ctx.fillStyle = 'rgba(0, 0, 0, 0.65)';
-      ctx.fillRect(0, 0, CW, CH);
-
-      ctx.fillStyle = '#FFD54F';
-      ctx.font = 'bold 36px Arial, sans-serif';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillText('GAME OVER', CW / 2, CH * 0.35);
-
-      ctx.fillStyle = '#FFFFFF';
-      ctx.font = 'bold 22px Arial, sans-serif';
-      ctx.fillText('Score: ' + score, CW / 2, CH * 0.45);
-
-      // Retry button
-      const btnX = CW / 2 - 80;
-      const btnY = CH * 0.53;
-      const btnW = 160;
-      const btnH = 50;
-
-      ctx.fillStyle = '#66BB6A';
-      ctx.shadowColor = 'rgba(0,0,0,0.3)';
-      ctx.shadowBlur = 8;
-      ctx.beginPath();
-      roundRect(ctx, btnX, btnY, btnW, btnH, 12);
-      ctx.fill();
-      ctx.shadowBlur = 0;
-
-      ctx.fillStyle = '#FFFFFF';
-      ctx.font = 'bold 20px Arial, sans-serif';
-      ctx.fillText('もう一度遊ぶ', CW / 2, btnY + btnH / 2);
-
-      // Store button bounds for click detection
-      canvas._retryBtn = { x: btnX, y: btnY, w: btnW, h: btnH };
-    } else {
-      canvas._retryBtn = null;
-    }
-
+  function finishFrame() {
     ctx.restore();
   }
 
-  function roundRect(ctx, x, y, w, h, r) {
+  function drawRoundedRect(x, y, w, h, r) {
+    ctx.beginPath();
     ctx.moveTo(x + r, y);
     ctx.lineTo(x + w - r, y);
     ctx.quadraticCurveTo(x + w, y, x + w, y + r);
@@ -479,254 +370,419 @@
     ctx.closePath();
   }
 
-  function drawCloud(x, y, size) {
+  function drawCloud(x, y, size, alpha) {
+    ctx.fillStyle = 'rgba(255,255,255,' + alpha + ')';
     ctx.beginPath();
-    ctx.arc(x, y, size * 0.4, 0, Math.PI * 2);
-    ctx.arc(x + size * 0.35, y - size * 0.15, size * 0.35, 0, Math.PI * 2);
-    ctx.arc(x + size * 0.7, y, size * 0.3, 0, Math.PI * 2);
-    ctx.arc(x + size * 0.35, y + size * 0.1, size * 0.3, 0, Math.PI * 2);
+    ctx.arc(x, y, size * 0.38, 0, Math.PI * 2);
+    ctx.arc(x + size * 0.36, y - size * 0.12, size * 0.31, 0, Math.PI * 2);
+    ctx.arc(x + size * 0.7, y, size * 0.26, 0, Math.PI * 2);
+    ctx.arc(x + size * 0.32, y + size * 0.12, size * 0.3, 0, Math.PI * 2);
     ctx.fill();
   }
 
-  function drawLilyPad(x, y, w, h) {
-    // Shadow
-    ctx.fillStyle = 'rgba(0, 0, 0, 0.15)';
-    ctx.beginPath();
-    ctx.ellipse(x + 3, y + 3, w / 2, h / 2, 0, 0, Math.PI * 2);
-    ctx.fill();
-
-    // Main pad body
-    ctx.fillStyle = '#43A047';
-    ctx.beginPath();
-    ctx.ellipse(x, y, w / 2, h / 2, 0, 0, Math.PI * 2);
-    ctx.fill();
-
-    // Lighter inner
-    ctx.fillStyle = '#66BB6A';
-    ctx.beginPath();
-    ctx.ellipse(x, y - 1, w * 0.35, h * 0.3, 0, 0, Math.PI * 2);
-    ctx.fill();
-
-    // Vein lines
-    ctx.strokeStyle = 'rgba(255, 255, 255, 0.2)';
-    ctx.lineWidth = 1;
-    for (let i = -2; i <= 2; i++) {
-      ctx.beginPath();
-      ctx.moveTo(x, y);
-      ctx.lineTo(x + i * w * 0.15, y - h * 0.3);
-      ctx.stroke();
-    }
-
-    // Edge highlight
-    ctx.strokeStyle = 'rgba(255, 255, 255, 0.2)';
-    ctx.lineWidth = 1.5;
-    ctx.beginPath();
-    ctx.ellipse(x, y, w / 2, h / 2, 0, 0, Math.PI * 2);
-    ctx.stroke();
-  }
-
-  function drawFrog(x, y) {
-    // Body (green ellipse)
-    ctx.fillStyle = '#4CAF50';
-    ctx.shadowColor = 'rgba(0,0,0,0.2)';
-    ctx.shadowBlur = 4;
-    ctx.beginPath();
-    ctx.ellipse(x, y, FROG_W / 2, FROG_H / 2, 0, 0, Math.PI * 2);
-    ctx.fill();
-
-    // Lighter belly
-    ctx.shadowBlur = 0;
-    ctx.fillStyle = '#81C784';
-    ctx.beginPath();
-    ctx.ellipse(x, y + FROG_H * 0.12, FROG_W * 0.3, FROG_H * 0.25, 0, 0, Math.PI * 2);
-    ctx.fill();
-
-    // Eye whites
-    ctx.fillStyle = '#FFFFFF';
-    ctx.beginPath();
-    ctx.ellipse(x - FROG_W * 0.22, y - FROG_H * 0.22, 6, 7, 0, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.beginPath();
-    ctx.ellipse(x + FROG_W * 0.22, y - FROG_H * 0.22, 6, 7, 0, 0, Math.PI * 2);
-    ctx.fill();
-
-    // Pupils
-    ctx.fillStyle = '#1B1B1B';
-    ctx.beginPath();
-    ctx.arc(x - FROG_W * 0.22, y - FROG_H * 0.22, 3.5, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.beginPath();
-    ctx.arc(x + FROG_W * 0.22, y - FROG_H * 0.22, 3.5, 0, Math.PI * 2);
-    ctx.fill();
-
-    // Eye highlights
-    ctx.fillStyle = '#FFFFFF';
-    ctx.beginPath();
-    ctx.arc(x - FROG_W * 0.25, y - FROG_H * 0.26, 1.8, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.beginPath();
-    ctx.arc(x + FROG_W * 0.19, y - FROG_H * 0.26, 1.8, 0, Math.PI * 2);
-    ctx.fill();
-
-    // Mouth (small smile)
-    ctx.strokeStyle = '#2E7D32';
-    ctx.lineWidth = 1.5;
-    ctx.beginPath();
-    ctx.arc(x, y + FROG_H * 0.08, 6, 0.1, Math.PI - 0.1);
-    ctx.stroke();
-
-    // Cheek blush
-    ctx.fillStyle = 'rgba(255, 150, 150, 0.3)';
-    ctx.beginPath();
-    ctx.ellipse(x - FROG_W * 0.3, y + FROG_H * 0.05, 4, 3, 0, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.beginPath();
-    ctx.ellipse(x + FROG_W * 0.3, y + FROG_H * 0.05, 4, 3, 0, 0, Math.PI * 2);
-    ctx.fill();
-
-    ctx.shadowBlur = 0;
-  }
-
-  function drawTitleScreen() {
-    // Sky background
-    const skyGrad = ctx.createLinearGradient(0, 0, 0, WATER_Y);
-    skyGrad.addColorStop(0, '#4FC3F7');
-    skyGrad.addColorStop(0.5, '#81D4FA');
-    skyGrad.addColorStop(1, '#B3E5FC');
-    ctx.fillStyle = skyGrad;
+  function drawBackground() {
+    const sky = ctx.createLinearGradient(0, 0, 0, WATER_Y);
+    sky.addColorStop(0, '#5ec8ff');
+    sky.addColorStop(0.55, '#98e2ff');
+    sky.addColorStop(1, '#d6f7ff');
+    ctx.fillStyle = sky;
     ctx.fillRect(0, 0, CW, WATER_Y);
 
-    // Water
-    const waterGrad = ctx.createLinearGradient(0, WATER_Y, 0, CH);
-    waterGrad.addColorStop(0, '#0288D1');
-    waterGrad.addColorStop(0.3, '#0277BD');
-    waterGrad.addColorStop(0.7, '#01579B');
-    waterGrad.addColorStop(1, '#0D47A1');
-    ctx.fillStyle = waterGrad;
+    const cloudOffset = (state.cameraX * 0.12) % 520;
+    drawCloud(48 - cloudOffset, 70, 72, 0.65);
+    drawCloud(222 - cloudOffset, 108, 52, 0.52);
+    drawCloud(390 - cloudOffset, 82, 62, 0.56);
+    drawCloud(560 - cloudOffset, 64, 68, 0.48);
+
+    const water = ctx.createLinearGradient(0, WATER_Y, 0, CH);
+    water.addColorStop(0, '#119fe7');
+    water.addColorStop(0.35, '#0a81ca');
+    water.addColorStop(1, '#0d5594');
+    ctx.fillStyle = water;
     ctx.fillRect(0, WATER_Y, CW, CH - WATER_Y);
 
-    // Water wave
-    ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)';
+    ctx.strokeStyle = 'rgba(255,255,255,0.34)';
     ctx.lineWidth = 2;
     ctx.beginPath();
     for (let x = 0; x <= CW; x += 2) {
-      const waveY = WATER_Y + Math.sin(x * 0.04) * 3 + Math.sin(x * 0.07) * 2;
-      if (x === 0) ctx.moveTo(x, waveY);
-      else ctx.lineTo(x, waveY);
+      const y = WATER_Y + Math.sin((x + state.frame * WATER_SCROLL_SPEED) * 0.05) * 3 + Math.sin((x + state.frame * 0.7) * 0.1) * 1.5;
+      if (x === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
     }
     ctx.stroke();
 
-    // Lily pads (decorative)
-    drawLilyPad(100, WATER_Y - PAD_H / 2 + 3, PAD_W + 5, PAD_H);
-    drawLilyPad(300, WATER_Y - PAD_H / 2 - 2, PAD_W - 5, PAD_H);
+    const shoreScreenX = worldToScreenX(SHORE_X);
+    ctx.fillStyle = '#b78d57';
+    ctx.fillRect(0, GROUND_Y, Math.max(shoreScreenX, 0), CH - GROUND_Y);
 
-    // Frog on first pad (decorative)
-    drawFrog(100, WATER_Y - PAD_H / 2 + 3 - FROG_H / 2 - PAD_H / 2);
+    ctx.fillStyle = '#8ecf63';
+    ctx.fillRect(0, GROUND_Y - 16, Math.max(shoreScreenX + 10, 0), 18);
 
-    // Title background
-    ctx.fillStyle = 'rgba(0, 0, 0, 0.4)';
-    roundRect(ctx, CW / 2 - 160, 80, 320, 200, 16);
+    if (shoreScreenX > -30 && shoreScreenX < CW + 80) {
+      ctx.fillStyle = '#d9b47b';
+      ctx.beginPath();
+      ctx.moveTo(shoreScreenX - 14, GROUND_Y);
+      ctx.lineTo(shoreScreenX + 26, GROUND_Y);
+      ctx.lineTo(shoreScreenX + 8, WATER_Y + 10);
+      ctx.lineTo(shoreScreenX - 24, WATER_Y + 6);
+      ctx.closePath();
+      ctx.fill();
+    }
+  }
+
+  function drawLilyPad(screenX, y, w, h) {
+    ctx.fillStyle = 'rgba(0,0,0,0.14)';
+    ctx.beginPath();
+    ctx.ellipse(screenX + 4, y + 5, w / 2, h / 2, 0, 0, Math.PI * 2);
     ctx.fill();
 
-    // Title text
-    ctx.fillStyle = '#FFD54F';
-    ctx.font = 'bold 42px Arial, sans-serif';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillText('Frog Leaper', CW / 2, 130);
-
-    // Subtitle
-    ctx.fillStyle = '#FFFFFF';
-    ctx.font = '16px Arial, sans-serif';
-    ctx.fillText('カエルの蓮渡り', CW / 2, 168);
-
-    // Instruction
-    ctx.fillStyle = '#B3E5FC';
-    ctx.font = '14px Arial, sans-serif';
-    ctx.fillText('水面に着地する直前にタップ！', CW / 2, 200);
-    ctx.fillText('蓮の葉を渡って進もう', CW / 2, 222);
-
-    // Start button
-    const btnX = CW / 2 - 90;
-    const btnY = 300;
-    const btnW = 180;
-    const btnH = 54;
-
-    const pulse = Math.sin(Date.now() * 0.004) * 0.15 + 0.85;
-    ctx.fillStyle = `rgba(102, 187, 106, ${pulse})`;
-    ctx.shadowColor = 'rgba(0,0,0,0.3)';
-    ctx.shadowBlur = 10;
+    ctx.fillStyle = '#3fa34d';
     ctx.beginPath();
-    roundRect(ctx, btnX, btnY, btnW, btnH, 14);
+    ctx.ellipse(screenX, y, w / 2, h / 2, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = '#6ecb63';
+    ctx.beginPath();
+    ctx.ellipse(screenX - 2, y - 1, w * 0.3, h * 0.28, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.strokeStyle = 'rgba(255,255,255,0.22)';
+    ctx.lineWidth = 1.4;
+    ctx.beginPath();
+    ctx.ellipse(screenX, y, w / 2, h / 2, 0, 0, Math.PI * 2);
+    ctx.stroke();
+
+    ctx.strokeStyle = 'rgba(255,255,255,0.18)';
+    ctx.beginPath();
+    ctx.moveTo(screenX - w * 0.18, y + h * 0.02);
+    ctx.lineTo(screenX + w * 0.15, y - h * 0.2);
+    ctx.stroke();
+  }
+
+  function drawFrog() {
+    const frog = state.frog;
+    const x = frogScreenX();
+    const y = frog.y;
+
+    ctx.save();
+    ctx.translate(x, y);
+    if (frog.state === 'air') {
+      ctx.rotate(clamp(frog.vy * 0.035, -0.35, 0.3));
+    } else if (frog.state === 'sinking') {
+      ctx.rotate(0.22);
+    }
+
+    ctx.shadowColor = 'rgba(0,0,0,0.22)';
+    ctx.shadowBlur = 5;
+    ctx.fillStyle = '#48b14b';
+    ctx.beginPath();
+    ctx.ellipse(0, 0, FROG_W / 2, FROG_H / 2, 0, 0, Math.PI * 2);
     ctx.fill();
     ctx.shadowBlur = 0;
 
-    ctx.fillStyle = '#FFFFFF';
-    ctx.font = 'bold 22px Arial, sans-serif';
-    ctx.fillText('タップしてスタート', CW / 2, btnY + btnH / 2);
+    ctx.fillStyle = '#7fd36f';
+    ctx.beginPath();
+    ctx.ellipse(0, 4, FROG_W * 0.28, FROG_H * 0.22, 0, 0, Math.PI * 2);
+    ctx.fill();
 
-    canvas._retryBtn = { x: btnX, y: btnY, w: btnW, h: btnH };
+    ctx.fillStyle = '#fff';
+    ctx.beginPath();
+    ctx.ellipse(-7, -6, 5.6, 6.5, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.ellipse(7, -6, 5.6, 6.5, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = '#10212e';
+    ctx.beginPath();
+    ctx.arc(-7, -5.5, 2.7, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(7, -5.5, 2.7, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.strokeStyle = '#2e7d32';
+    ctx.lineWidth = 1.6;
+    ctx.beginPath();
+    ctx.arc(0, 2, 5.5, 0.2, Math.PI - 0.2);
+    ctx.stroke();
+
+    if (frog.justBoosted && state.frame % 10 < 5) {
+      ctx.strokeStyle = 'rgba(255,255,160,0.95)';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(0, 0, 24, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+
+    ctx.restore();
   }
 
-  // --- Drawing ---
-  function handleTap(clientX, clientY) {
-    const rect = canvas.getBoundingClientRect();
-    const sx = scaleX();
-    const sy = scaleY();
-    const cx = (clientX - rect.left) / sx;
-    const cy = (clientY - rect.top) / sy;
+  function drawParticles() {
+    for (const p of state.particles) {
+      const alpha = clamp(p.life / 30, 0, 1);
+      ctx.globalAlpha = alpha;
+      ctx.fillStyle = p.color;
+      ctx.beginPath();
+      ctx.arc(worldToScreenX(p.x), p.y, p.size * alpha, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  }
 
-    if (gameState === 'title') {
-      // Start the game on tap
-      initGame();
+  function drawPads() {
+    for (const pad of state.pads) {
+      const x = worldToScreenX(pad.x);
+      if (x < -pad.w || x > CW + pad.w) continue;
+      drawLilyPad(x, pad.y, pad.w, pad.h);
+    }
+  }
+
+  function drawHud() {
+    ctx.fillStyle = 'rgba(8, 18, 32, 0.45)';
+    drawRoundedRect(12, 12, 132, 48, 12);
+    ctx.fill();
+
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 16px Arial, sans-serif';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
+    ctx.fillText('SCORE', 24, 22);
+    ctx.font = 'bold 24px Arial, sans-serif';
+    ctx.fillText(String(state.score), 24, 38);
+
+    if (state.mode === 'playing' && state.frog.supportId === 'land') {
+      ctx.fillStyle = 'rgba(0,0,0,0.3)';
+      drawRoundedRect(68, 88, 264, 42, 12);
+      ctx.fill();
+      ctx.fillStyle = '#fff';
+      ctx.font = 'bold 18px Arial, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('陸地を走ってジャンプ！', CW / 2, 109);
+    }
+  }
+
+  function drawTimingPrompt() {
+    if (!state.timingWindowActive || state.mode !== 'playing' || state.frog.state !== 'air') return;
+
+    const pulse = Math.sin(state.frame * 0.28) * 0.18 + 0.82;
+    const promptX = frogScreenX();
+    const promptY = WATER_Y - 28;
+
+    ctx.fillStyle = 'rgba(255, 84, 84, 0.22)';
+    ctx.fillRect(0, WATER_Y - TIMING_WINDOW_HEIGHT, CW, TIMING_WINDOW_HEIGHT + 12);
+
+    ctx.strokeStyle = 'rgba(255, 235, 120, 0.95)';
+    ctx.lineWidth = 2;
+    ctx.setLineDash([7, 6]);
+    ctx.beginPath();
+    ctx.moveTo(0, WATER_Y);
+    ctx.lineTo(CW, WATER_Y);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    ctx.strokeStyle = 'rgba(255, 255, 130, ' + pulse + ')';
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.arc(promptX, WATER_Y - 2, 20 + Math.sin(state.frame * 0.22) * 4, 0, Math.PI * 2);
+    ctx.stroke();
+
+    ctx.fillStyle = 'rgba(255,255,140,' + pulse + ')';
+    ctx.font = 'bold 22px Arial, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('TAP!', promptX, promptY);
+
+    const barW = 110;
+    const barH = 8;
+    const barX = clamp(promptX - barW / 2, 16, CW - barW - 16);
+    const barY = WATER_Y + 16;
+    ctx.fillStyle = 'rgba(0,0,0,0.35)';
+    drawRoundedRect(barX, barY, barW, barH, 4);
+    ctx.fill();
+
+    ctx.fillStyle = '#ffe66d';
+    drawRoundedRect(barX, barY, barW * clamp(state.timingWindowProgress, 0.12, 1), barH, 4);
+    ctx.fill();
+  }
+
+  function drawOverlay(title, subtitle, buttonLabel) {
+    ctx.fillStyle = 'rgba(4, 10, 22, 0.62)';
+    ctx.fillRect(0, 0, CW, CH);
+
+    ctx.fillStyle = 'rgba(8, 18, 32, 0.78)';
+    drawRoundedRect(42, 94, 316, 248, 22);
+    ctx.fill();
+
+    ctx.fillStyle = '#ffd85b';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.font = 'bold 40px Arial, sans-serif';
+    ctx.fillText(title, CW / 2, 150);
+
+    ctx.fillStyle = '#fff';
+    ctx.font = '18px Arial, sans-serif';
+    const lines = subtitle.split('\n');
+    lines.forEach(function(line, index) {
+      ctx.fillText(line, CW / 2, 204 + index * 28);
+    });
+
+    const btn = { x: 92, y: 276, w: 216, h: 54 };
+    state.buttons.primary = btn;
+
+    const pulse = Math.sin(state.frame * 0.15) * 0.12 + 0.88;
+    ctx.fillStyle = 'rgba(94, 197, 88, ' + pulse + ')';
+    drawRoundedRect(btn.x, btn.y, btn.w, btn.h, 16);
+    ctx.fill();
+
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 22px Arial, sans-serif';
+    ctx.fillText(buttonLabel, CW / 2, btn.y + btn.h / 2);
+  }
+
+  function drawTitleScreen() {
+    drawBackground();
+    drawPads();
+
+    ctx.fillStyle = 'rgba(8,18,32,0.56)';
+    drawRoundedRect(36, 74, 328, 238, 22);
+    ctx.fill();
+
+    ctx.fillStyle = '#ffd85b';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.font = 'bold 42px Arial, sans-serif';
+    ctx.fillText('Frog Leaper', CW / 2, 128);
+
+    ctx.fillStyle = '#fff';
+    ctx.font = '20px Arial, sans-serif';
+    ctx.fillText('カエルの蓮渡り', CW / 2, 166);
+
+    ctx.font = '16px Arial, sans-serif';
+    ctx.fillText('陸地から走ってジャンプし、', CW / 2, 208);
+    ctx.fillText('水面でタイミング良く TAP! して池を渡ろう', CW / 2, 234);
+
+    drawOverlay('START', 'クリック / タップで開始\nリトライも同じ操作です', 'タップしてスタート');
+  }
+
+  function drawGameOver() {
+    drawOverlay('GAME OVER', 'Score: ' + state.score + '\nBest: ' + state.bestScore, 'もう一度遊ぶ');
+  }
+
+  function draw() {
+    clearCanvas();
+    drawBackground();
+    drawPads();
+    drawParticles();
+    drawFrog();
+    drawTimingPrompt();
+    drawHud();
+
+    if (state.mode === 'title') {
+      drawTitleScreen();
+    } else if (state.mode === 'gameover') {
+      drawGameOver();
+    } else {
+      state.buttons.primary = null;
+    }
+
+    finishFrame();
+  }
+
+  function getCanvasPoint(clientX, clientY) {
+    const rect = canvas.getBoundingClientRect();
+    return {
+      x: ((clientX - rect.left) / rect.width) * CW,
+      y: ((clientY - rect.top) / rect.height) * CH
+    };
+  }
+
+  function isInsideButton(point, button) {
+    return !!button && point.x >= button.x && point.x <= button.x + button.w && point.y >= button.y && point.y <= button.y + button.h;
+  }
+
+  function tapAtLogicalPoint(point) {
+    if (state.mode === 'title') {
+      startGame();
       return;
     }
 
-    if (gameState === 'gameover') {
-      // Check retry button
-      const btn = canvas._retryBtn;
-      if (btn && cx >= btn.x && cx <= btn.x + btn.w && cy >= btn.y && cy <= btn.y + btn.h) {
-        initGame();
+    if (state.mode === 'gameover') {
+      if (!state.buttons.primary || isInsideButton(point, state.buttons.primary)) {
+        startGame();
       }
       return;
     }
 
-    // During gameplay: tap = re-jump if in landing zone
-    if (landingZoneActive && frog.alive && gameState === 'playing') {
-      // Re-jump!
-      frog.vy = TAP_JUMP_VEL;
-      landingZoneActive = false;
-      // Visual feedback: small splash at water surface
-      spawnSplash(FROG_SCREEN_X, WATER_Y);
+    if (state.mode !== 'playing') return;
+
+    if (state.timingWindowActive && state.frog.state === 'air' && state.frog.alive) {
+      launchFrog(true);
+      spawnSplash(state.frog.x, WATER_Y, 10);
     }
   }
 
-  // --- Mouse events ---
-  canvas.addEventListener('mousedown', function(e) {
-    e.preventDefault();
-    handleTap(e.clientX, e.clientY);
-  });
-  canvas.addEventListener('touchstart', function(e) {
-    e.preventDefault();
-    const touch = e.touches[0];
-    if (touch) handleTap(touch.clientX, touch.clientY);
+  function handlePointerDown(clientX, clientY) {
+    const point = getCanvasPoint(clientX, clientY);
+    tapAtLogicalPoint(point);
+  }
+
+  canvas.addEventListener('pointerdown', function(event) {
+    event.preventDefault();
+    handlePointerDown(event.clientX, event.clientY);
   }, { passive: false });
 
-  // Prevent context menu on long press
-  canvas.addEventListener('contextmenu', function(e) {
-    e.preventDefault();
+  canvas.addEventListener('contextmenu', function(event) {
+    event.preventDefault();
   });
 
-  // --- Game Loop ---
+  window.addEventListener('resize', resize);
+
   function loop() {
     update();
     draw();
-    requestAnimationFrame(loop);
+    window.requestAnimationFrame(loop);
   }
 
-  // --- Start ---
+  resize();
+  resetWorld();
   loop();
 
+  window.__frogDebug = {
+    startGame: startGame,
+    gameOver: gameOver,
+    step: function(frames) {
+      const total = Math.max(1, frames || 1);
+      for (let i = 0; i < total; i++) update();
+    },
+    tapLogical: function(x, y) {
+      tapAtLogicalPoint({ x: x, y: y });
+    },
+    getState: function() {
+      return JSON.parse(JSON.stringify({
+        mode: state.mode,
+        score: state.score,
+        bestScore: state.bestScore,
+        frame: state.frame,
+        cameraX: state.cameraX,
+        timingWindowActive: state.timingWindowActive,
+        buttons: state.buttons,
+        frog: state.frog,
+        pads: state.pads
+      }));
+    },
+    getConstants: function() {
+      return {
+        CW: CW,
+        CH: CH,
+        WATER_Y: WATER_Y,
+        SHORE_X: SHORE_X,
+        TIMING_WINDOW_HEIGHT: TIMING_WINDOW_HEIGHT,
+        SINK_DEPTH: SINK_DEPTH
+      };
+    }
+  };
 })();
 </script>
 </body>
